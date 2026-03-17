@@ -1,4 +1,3 @@
-# event_logger.py
 import os
 import json
 from datetime import datetime
@@ -40,6 +39,7 @@ class EventLogger:
 
     def _init_mongo(self):
         if not self.mongo_enabled:
+            print("[LOGGER] MongoDB logging dang tat.")
             return
 
         if MongoClient is None:
@@ -47,13 +47,13 @@ class EventLogger:
             return
 
         try:
-            self.mongo_client = MongoClient(self.mongo_uri, serverSelectionTimeoutMS=2000)
-            self.mongo_client.server_info()
+            self.mongo_client = MongoClient(self.mongo_uri, serverSelectionTimeoutMS=5000)
+            self.mongo_client.admin.command("ping")
             db = self.mongo_client[self.mongo_db]
             self.mongo_col = db[self.mongo_collection]
             print("[LOGGER] MongoDB connected.")
         except Exception as ex:
-            print("[LOGGER] Khong ket noi duoc MongoDB:", ex)
+            print("[LOGGER] Khong ket noi duoc MongoDB:", repr(ex))
             self.mongo_client = None
             self.mongo_col = None
 
@@ -63,14 +63,11 @@ class EventLogger:
         cam_id,
         person_id=None,
         person_name="Unknown",
-        sim=0.0,
-        snapshot_path=None,
         extra=None
     ):
         now = datetime.now()
-
-        event = {
-            "event_type": event_type,                  # FALL / BOTTLE / LYING
+        return {
+            "event_type": event_type,
             "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
             "date": now.strftime("%Y-%m-%d"),
             "time": now.strftime("%H:%M:%S"),
@@ -78,11 +75,8 @@ class EventLogger:
             "cam_id": cam_id,
             "person_id": person_id,
             "person_name": person_name,
-            "sim": round(float(sim), 4),
-            "snapshot_path": snapshot_path,
             "extra": extra or {}
         }
-        return event
 
     def log_event(
         self,
@@ -90,8 +84,6 @@ class EventLogger:
         cam_id,
         person_id=None,
         person_name="Unknown",
-        sim=0.0,
-        snapshot_path=None,
         extra=None
     ):
         event = self._build_event(
@@ -99,8 +91,6 @@ class EventLogger:
             cam_id=cam_id,
             person_id=person_id,
             person_name=person_name,
-            sim=sim,
-            snapshot_path=snapshot_path,
             extra=extra
         )
 
@@ -128,9 +118,11 @@ class EventLogger:
 
     def _write_mongo(self, event):
         if self.mongo_col is None:
+            print("[LOGGER] mongo_col is None, khong ghi duoc MongoDB")
             return
 
         try:
-            self.mongo_col.insert_one(event)
+            result = self.mongo_col.insert_one(event)
+            print("[MONGO_INSERT_OK]", result.inserted_id)
         except Exception as ex:
-            print("[LOGGER] Loi ghi MongoDB:", ex)
+            print("[LOGGER] Loi ghi MongoDB:", repr(ex))
