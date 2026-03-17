@@ -1,9 +1,7 @@
-# camera_session.py
 import time
 from datetime import datetime
 import numpy as np
 import cv2
-import event_logger
 import config
 import utils_cv
 import face_recog
@@ -69,7 +67,7 @@ def _run_pose_on_roi(pose_model, frame, x1, y1, x2, y2):
 
 def run_camera_session(det_model, pose_model, face_app, ds_nhan_su,
                        yolo_every_n, nguong_sim, nhan_dien_moi,
-                       mirror, rotate_mode):
+                       mirror, rotate_mode, logger=None):
 
     cap = cv2.VideoCapture(config.CAM_INDEX)
     if not cap.isOpened():
@@ -82,18 +80,12 @@ def run_camera_session(det_model, pose_model, face_app, ds_nhan_su,
     tracker = Sort(max_age=30, min_hits=1, iou_threshold=0.35)
     fstate = pose_fall.FallState()
 
-    # face
     last_recog = {}
     tid_to_person = {}
-    tid_to_sim = {}
-
-    # show id reuse
     tid_to_showid = {}
     free_showids = []
     next_showid = 0
     miss_count = {}
-
-    # posture/fall
     tid_posture = {}
     tid_is_fall = {}
 
@@ -104,17 +96,17 @@ def run_camera_session(det_model, pose_model, face_app, ds_nhan_su,
     paused = False
     show_help = False
 
-    # fps
     t0 = time.time()
     frames = 0
     fps = 0.0
 
-    # hud cache
     last_hold_ids_str = "-"
 
-    # alarm anti-spam
+    # chống spam cảnh báo
     last_alarm_time = {}
-    alarm_gap = 2.0
+
+    # 10 phút = 600 giây
+    alarm_gap = 600.0
 
     while True:
         if not paused:
@@ -131,7 +123,6 @@ def run_camera_session(det_model, pose_model, face_app, ds_nhan_su,
             frame_id += 1
             now = time.time()
 
-            # ===== YOLO detect person + bottle =====
             if frame_id % yolo_every_n == 0:
                 res = det_model.predict(
                     frame,
@@ -164,7 +155,6 @@ def run_camera_session(det_model, pose_model, face_app, ds_nhan_su,
             tracks = tracker.update(dets_cache)
             cur_tids = set(int(t[4]) for t in tracks) if len(tracks) else set()
 
-            # ===== recycle showid =====
             for tid in list(tid_to_showid.keys()):
                 if tid not in cur_tids:
                     miss_count[tid] = miss_count.get(tid, 0) + 1
@@ -176,10 +166,9 @@ def run_camera_session(det_model, pose_model, face_app, ds_nhan_su,
                         miss_count.pop(tid, None)
                         last_recog.pop(tid, None)
                         tid_to_person.pop(tid, None)
-                        tid_to_sim.pop(tid, None)
-                        fstate.tid_last_pose.pop(tid, None)
                         tid_posture.pop(tid, None)
                         tid_is_fall.pop(tid, None)
+                        fstate.tid_last_pose.pop(tid, None)
                 else:
                     miss_count[tid] = 0
 
@@ -191,33 +180,28 @@ def run_camera_session(det_model, pose_model, face_app, ds_nhan_su,
                         tid_to_showid[tid] = next_showid
                         next_showid += 1
 
-            # ===== bottle holding =====
             tid_holding = events.detect_bottle_holding(tracks, bottles_cache)
             holding_ids = [tid_to_showid.get(tid, tid) for tid, h in tid_holding.items() if h]
             holding_ids.sort()
             last_hold_ids_str = ",".join(map(str, holding_ids)) if holding_ids else "-"
             num_holding = len(holding_ids)
 
-            # ===== face recognition =====
             for x1, y1, x2, y2, tid in tracks:
                 x1, y1, x2, y2, tid = int(x1), int(y1), int(x2), int(y2), int(tid)
                 if (tid not in last_recog) or (now - last_recog[tid] > nhan_dien_moi):
                     roi = utils_cv.cat_roi_an_toan(frame, x1, y1, x2, y2, pad=10)
                     person = None
-                    sim = 0.0
 
                     if roi is not None:
                         faces = face_app.get(roi)
                         f = utils_cv.pick_face_largest(faces)
                         if f is not None:
                             emb = f.normed_embedding.astype(np.float32)
-                            person, sim = face_recog.so_khop(emb, ds_nhan_su, nguong_sim)
+                            person, _sim = face_recog.so_khop(emb, ds_nhan_su, nguong_sim)
 
                     tid_to_person[tid] = person
-                    tid_to_sim[tid] = sim
                     last_recog[tid] = now
 
-            # ===== pose =====
             if frame_id % config.POSE_EVERY_N == 0 and len(tracks):
                 tracks_sorted = sorted(tracks, key=lambda t: (t[2] - t[0]) * (t[3] - t[1]), reverse=True)
 
@@ -240,19 +224,12 @@ def run_camera_session(det_model, pose_model, face_app, ds_nhan_su,
                     is_fall = pose_fall.update_fall_by_pose(fstate, tid, now, kps)
                     tid_is_fall[tid] = is_fall
 
-                    if is_fall and pose_fall.can_fire_fall(fstate, tid, now):
-                        pose_fall.mark_fire_fall(fstate, tid, now)
-                        path = utils_cv.save_snapshot(frame, prefix="fall")
-                        print(f"[EVENT] FALL | cam_id={tid_to_showid.get(tid, tid)} | snap={path}")
-
-            # ===== fps =====
             frames += 1
             if time.time() - t0 >= 1.0:
                 fps = frames / (time.time() - t0)
                 t0 = time.time()
                 frames = 0
 
-            # ===== realtime info =====
             people_n = len(tracks)
             num_lying = sum(1 for v in tid_posture.values() if v == "NAM")
             now_dt = datetime.now()
@@ -270,7 +247,6 @@ def run_camera_session(det_model, pose_model, face_app, ds_nhan_su,
             thu_str = thu_map[now_dt.weekday()]
             realtime_str = f"{now_dt.strftime('%d-%m-%Y %H:%M:%S')} | {thu_str}"
 
-            # ===== HUD top =====
             utils_cv.overlay_rect_alpha(frame, 0, 0, W, 68, (0, 0, 0), alpha=0.45)
 
             hud_left = f"FPS:{fps:.1f}  |  People:{people_n}"
@@ -286,19 +262,34 @@ def run_camera_session(det_model, pose_model, face_app, ds_nhan_su,
             cv2.putText(frame, f"So nguoi te, nam: {num_lying}", (W - 240, 58),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 0, 255), 2, cv2.LINE_AA)
 
-            # crowd warning
+            # đông người: 10 phút mới gửi lại 1 lần nếu vẫn còn cảnh báo
             if people_n >= config.CROWD_WARN_N:
                 utils_cv.draw_warning_logo(frame, x=10, y=78, size=70)
                 utils_cv.put_text_bg(frame, f"CANH BAO: DONG NGUOI ({people_n})", (90, 122),
                                      font_scale=0.75, color=(255, 255, 255), bg=(0, 0, 255), alpha=0.55)
 
-            # ===== draw each person =====
+                last_t = last_alarm_time.get(("CROWD", "CROWD"), 0.0)
+                if now - last_t >= alarm_gap:
+                    if logger is not None:
+                        logger.log_event(
+                            event_type="CROWD",
+                            cam_id="ALL",
+                            person_id=None,
+                            person_name="MULTI_PERSON",
+                            extra={
+                                "people_count": people_n,
+                                "crowd_threshold": config.CROWD_WARN_N,
+                                "realtime_str": realtime_str
+                            }
+                        )
+                    print(f"[EVENT] CROWD | people={people_n} | time={realtime_str}")
+                    last_alarm_time[("CROWD", "CROWD")] = now
+
             for x1, y1, x2, y2, tid in tracks:
                 x1, y1, x2, y2, tid = int(x1), int(y1), int(x2), int(y2), int(tid)
                 cam_id = tid_to_showid.get(tid, tid)
 
                 person = tid_to_person.get(tid)
-                sim = float(tid_to_sim.get(tid, 0.0))
                 name = "Unknown" if person is None else person.get("ho_ten", "Unknown")
 
                 person_id_show = "--"
@@ -313,8 +304,6 @@ def run_camera_session(det_model, pose_model, face_app, ds_nhan_su,
                 holding = bool(tid_holding.get(tid, False))
 
                 posture_show = "TE NGA" if is_fall else posture
-
-                # ===== alarm rules =====
                 is_alarm = is_fall or is_lying or holding
 
                 alarm_type = None
@@ -325,20 +314,34 @@ def run_camera_session(det_model, pose_model, face_app, ds_nhan_su,
                 elif holding:
                     alarm_type = "BOTTLE"
 
+                # chỉ khi đang còn cảnh báo mới xét gửi,
+                # và mỗi 10 phút mới gửi lại 1 lần
                 if alarm_type is not None:
                     last_t = last_alarm_time.get((tid, alarm_type), 0.0)
                     if now - last_t >= alarm_gap:
+                        person_id_val = None if person is None else int(person["person_id"])
+                        person_name_val = "Unknown" if person is None else person.get("ho_ten", "Unknown")
+
+                        if logger is not None:
+                            logger.log_event(
+                                event_type=alarm_type,
+                                cam_id=cam_id,
+                                person_id=person_id_val,
+                                person_name=person_name_val,
+                                extra={
+                                    "people_count": people_n,
+                                    "posture": posture_show,
+                                    "holding": holding,
+                                    "realtime_str": realtime_str
+                                }
+                            )
+
                         print(f"[EVENT] {alarm_type} | cam_id={cam_id} | time={realtime_str}")
                         last_alarm_time[(tid, alarm_type)] = now
 
                 box_color = (0, 0, 255) if is_alarm else (0, 255, 0)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
 
-                person_id_show = "--"
-                if person is not None:
-                    person_id_show = f"{int(person['person_id']):02d}"
-
-                
                 utils_cv.put_text_bg(frame, line1, (x1, max(85, y1 - 8)),
                                      font_scale=0.55, color=(255, 255, 255), bg=(0, 0, 0), alpha=0.55)
 
@@ -351,7 +354,6 @@ def run_camera_session(det_model, pose_model, face_app, ds_nhan_su,
                                      font_scale=0.60, color=(255, 255, 255),
                                      bg=status_bg, alpha=0.55)
 
-                # ===== bottle bounding box =====
                 if holding:
                     bottle_box = _find_nearest_bottle_for_person(x1, y1, x2, y2, bottles_cache)
                     if bottle_box is not None:
@@ -369,16 +371,13 @@ def run_camera_session(det_model, pose_model, face_app, ds_nhan_su,
                             alpha=0.55
                         )
 
-                # pose skeleton
                 kps = fstate.tid_last_pose.get(tid)
                 if kps is not None:
                     pose_fall.draw_pose(frame, kps, color=POSE_DRAW_COLOR)
 
-                # alarm icon
                 if is_alarm:
                     utils_cv.draw_warning_logo(frame, x=min(W - 80, x2 + 5), y=max(78, y1), size=55)
 
-            # ===== bottom help =====
             if show_help:
                 menu_text = (
                     "ESC Thoat | H Menu | R Dang ky | E Sua | X Xoa | L Reload | "
@@ -388,11 +387,9 @@ def run_camera_session(det_model, pose_model, face_app, ds_nhan_su,
                 cv2.putText(frame, menu_text, (10, H - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 255, 255), 2, cv2.LINE_AA)
 
-            # show scaled window
             frame_show = cv2.resize(frame, None, fx=DISPLAY_SCALE, fy=DISPLAY_SCALE, interpolation=cv2.INTER_LINEAR)
             cv2.imshow("NHAN DIEN", frame_show)
 
-        # ===== key handling =====
         key = cv2.waitKey(1) & 0xFF
 
         if key in (ord('p'), ord('P')):
