@@ -1,4 +1,3 @@
-# main.py
 import os
 os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
 
@@ -8,10 +7,10 @@ from ultralytics import YOLO
 import csv_db
 import face_recog
 import camera_session
+import event_logger
 
 
 def main():
-    # ===== Load state from config =====
     yolo_every_n = config.YOLO_EVERY_N
     nguong_sim = config.NGUONG_SIM
     nhan_dien_moi = config.NHAN_DIEN_MOI
@@ -20,12 +19,21 @@ def main():
 
     print("\n========== AI GIAM SAT ==========")
 
-    # ===== CSV =====
     csv_db.tao_db_csv()
     ds_nhan_su = csv_db.tai_tat_ca_csv()
     print(f"[CSV] Da tai {len(ds_nhan_su)} nhan su")
 
-    # ===== Face =====
+    # Hardcode URI để test cho chắc
+    mongo_uri = "mongodb+srv://giamsat_app:T1234567@cluster0.mrtkbwc.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+    print("MONGO_URI =", mongo_uri)
+
+    logger = event_logger.EventLogger(
+        mongo_enabled=True,
+        mongo_uri=mongo_uri,
+        mongo_db="giamsat_ai",
+        mongo_collection="events"
+    )
+
     print("[LOAD] Face recognition...")
     face_app = face_recog.create_face_app(
         ctx_id=config.FACE_CTX_ID,
@@ -33,32 +41,29 @@ def main():
     )
     print("[OK] Face model ready")
 
-    # ===== YOLO Detect =====
     print("[LOAD] YOLO detect:", config.MODEL_DET_PATH)
     det_model = YOLO(config.MODEL_DET_PATH)
     print("[OK] YOLO detect ready")
 
-    # ===== YOLO Pose =====
     print("[LOAD] YOLO pose:", config.MODEL_POSE_PATH)
     pose_model = YOLO(config.MODEL_POSE_PATH)
     print("[OK] YOLO pose ready")
 
     print("\n===== PHIM =====")
     print(" ESC : Thoat")
-    print(" R   : Dang ky (tu dong quet nhieu huong mat)")
-    print(" H   : Hien/An menu phim tren giao dien")
+    print(" R   : Dang ky")
+    print(" H   : Hien/An menu")
     print(" E   : Sua theo person_id")
-    print(" X   : Xoa theo person_id + reindex 1..N")
+    print(" X   : Xoa theo person_id")
     print(" L   : Reload CSV")
     print(" P   : Pause/Resume")
     print(" +/- : Tang/Giam similarity")
     print(" 1/2/3 : Doi toc do YOLO")
     print(" M   : Bat/tat Mirror")
-    print(" T   : Xoay 90 do (vong)")
+    print(" T   : Xoay 90 do")
     print(" S   : Snapshot")
     print("====================\n")
 
-    # ===== Main loop =====
     while True:
         action, state = camera_session.run_camera_session(
             det_model,
@@ -69,24 +74,21 @@ def main():
             nguong_sim,
             nhan_dien_moi,
             mirror,
-            rotate_mode
+            rotate_mode,
+            logger
         )
 
-        # cập nhật state realtime từ camera_session
         yolo_every_n, nguong_sim, nhan_dien_moi, mirror, rotate_mode = state
 
-        # ===== EXIT =====
         if action == "EXIT":
             print("[EXIT]")
             break
 
-        # ===== RELOAD =====
         if action == "RELOAD":
             ds_nhan_su = csv_db.tai_tat_ca_csv()
             print(f"[CSV] Reload: {len(ds_nhan_su)} nhan su")
             continue
 
-        # ===== REGISTER =====
         if action == "REGISTER":
             try:
                 emb = face_recog.capture_face_embedding_for_register(
@@ -107,9 +109,9 @@ def main():
                 ngay_sinh = input("Ngay sinh (YYYY-MM-DD): ").strip()
 
                 new_id = csv_db.them_nhan_su_csv(
-                    person_id,ho_ten, ma_nv, bo_phan, ngay_sinh, emb
+                    person_id, ho_ten, ma_nv, bo_phan, ngay_sinh, emb
                 )
-                
+
                 if new_id is None:
                     print("[DK] Dang ky that bai do trung person_id.")
                     continue
@@ -118,10 +120,8 @@ def main():
                 print(f"[CSV] Reload: {len(ds_nhan_su)} nhan su")
             except Exception as ex:
                 print("[REGISTER] Loi:", ex)
-
             continue
 
-        # ===== EDIT =====
         if action == "EDIT":
             try:
                 pid = int(input("\nNhap person_id can sua: ").strip())
@@ -131,10 +131,8 @@ def main():
                     print(f"[CSV] Reload: {len(ds_nhan_su)} nhan su")
             except Exception as ex:
                 print("[EDIT] Loi:", ex)
-
             continue
 
-        # ===== DELETE =====
         if action == "DELETE":
             try:
                 pid = int(input("\nNhap person_id can xoa: ").strip())
@@ -144,7 +142,6 @@ def main():
                     print(f"[CSV] Reload: {len(ds_nhan_su)} nhan su")
             except Exception as ex:
                 print("[DELETE] Loi:", ex)
-
             continue
 
 
